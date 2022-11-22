@@ -1,0 +1,163 @@
+# Update DB
+
+import requests
+import numpy as np
+import pandas as pd
+import datetime
+from bs4 import BeautifulSoup
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.by import By
+from selenium import webdriver
+import re
+import time
+
+MAP = {
+    'gov-001': 'https://forum.makerdao.com/tag/gov-001',
+    'sf-001': 'https://forum.makerdao.com/tag/sf-001',
+    'ces-001': 'https://forum.makerdao.com/tag/ces-001',
+    'sas-001': 'https://forum.makerdao.com/tag/sas-001',
+    'risk-001': 'https://forum.makerdao.com/tag/risk-001',
+    'tech-001': 'https://forum.makerdao.com/tag/tech-001',
+    # 'sh-001': 'https://forum.makerdao.com/tag/sh-001',
+    'gro-001': 'https://forum.makerdao.com/tag/gro-001',
+    # 'rwf-001': 'https://forum.makerdao.com/tag/rwf-001',
+    'com-001': 'https://forum.makerdao.com/tag/com-001',
+    'dux-001': 'https://forum.makerdao.com/tag/dux-001',
+    'sne-001': 'https://forum.makerdao.com/tag/sne-001',
+    'deco-001': 'https://forum.makerdao.com/tag/deco-001',
+    # 'events-001': 'https://forum.makerdao.com/tag/events-001',
+    'pe-001': 'https://forum.makerdao.com/tag/pe-001',
+    'ses-001': 'https://forum.makerdao.com/tag/ses-001',
+    'is-001': 'https://forum.makerdao.com/tag/is-001',
+    'daif-001': 'https://forum.makerdao.com/tag/daif-001',
+    'din-001': 'https://forum.makerdao.com/tag/din-001',
+    'ora-001': 'https://forum.makerdao.com/tag/ora-001'
+}
+
+for doc in MAP.keys():
+    url = MAP[doc]
+
+    res = requests.get(url).text
+    soup = BeautifulSoup(res, 'html.parser')
+
+    links = []
+    data = []
+
+    # grabbing top and bottom line post/tag links
+    top_line = [a['href'] for a in soup.findAll(
+        'a', class_='title') if a.stripped_strings]  # first page post links
+    for line in top_line:
+        links.append(line)
+
+    for alldata in soup.findAll(re.compile("td")):
+        raw = alldata.text.split(',')
+        cc = list(map(lambda a: a.strip(), raw))
+        cl = ' '.join(cc).splitlines()
+
+        new_list = [e for e in cl if e.strip()]
+        for i in new_list:
+            data.append(i.split(','))
+
+    # return data, links
+
+    # start:stop:step to splice data
+    titles = data[0::6]
+    mainTag = data[1::6]
+    subTags = data[2::6]
+    replies = data[3::6]
+    views = data[4::6]
+    dates = data[5::6]
+    links = links[0:]
+
+    # cleaning columns
+    sub_tags_final = []
+    for item in subTags:
+        i = ' '.join(item)
+        sub_tags_final.append(i.split())
+
+    # match all index lengths with NaN if necessary
+    if len(dates) < len(titles):
+        dates += (len(titles) - len(dates)) * ['Archived']
+    if len(links) < len(titles):
+        links += (len(titles) - len(links)) * ['Archived']
+
+    df = pd.DataFrame({
+
+        'titles': titles,
+        'mainTag': mainTag,
+        'subTags': sub_tags_final,
+        'replies': replies,
+        'views': views,
+        'links': links
+    })
+
+    # cast to string to strip unwanted bracket elements
+    df['titles'] = df['titles'].astype(str).str.strip('[]')
+    df['mainTag'] = df['mainTag'].astype(str).str.strip('[]')
+    df['subTags'] = df['subTags'].astype(str).str.strip('[]')
+    df['replies'] = df['replies'].astype(str).str.strip('[]')
+    df['views'] = df['views'].astype(str).str.strip('[]')
+    df['links'] = df['links'].astype(str).str.strip('[]')
+
+    # strip quotes
+    df = df.replace("'", '', regex=True)
+
+    # cast to proper dtypes, split dates
+    df['replies'] = df['replies'].replace(r'[k]+$', '', regex=True).astype(float) * \
+        df['replies'].str.extract(
+        r'[\d\.]+([k]+)', expand=False).fillna(1).replace(['k'], [10**3]).astype(int)
+    df['views'] = df['views'].replace(r'[k]+$', '', regex=True).astype(float) * \
+        df['views'].str.extract(
+        r'[\d\.]+([k]+)', expand=False).fillna(1).replace(['k'], [10**3]).astype(int)
+
+    # subTags split and clean
+    df['subTags'] = df['subTags'].astype(str).str.split(',')
+    df['subTags'] = df['subTags'].astype(str).str.strip('[]')
+    df['subTags'] = df['subTags'].replace("'", '', regex=True).replace('  ', ' ', regex=True)
+
+    ''' scrapes js hover element dates '''
+
+    options = webdriver.ChromeOptions()
+    options.add_argument('--ignore-certificate-errors')
+    options.add_argument('--incognito')
+    options.add_argument('--headless')
+
+    # driver instance
+    driver = webdriver.Chrome(options=options)
+    driver.get(url)
+
+    dates = []
+    dts = driver.find_elements(By.XPATH, '//*/tr[*]/td[5]')
+    for date in dts:
+        # assign newline to separator char
+        dates.append(date.get_attribute('title').replace('\n', ' | '))
+
+    clean_dates = []
+    for date in dates:
+        sep = '|'  # remove everthing after separators
+        sep2 = ':'
+
+        dt = date.split(sep, 1)[0]     # strip last post time
+        dtstr = dt.replace('First post: ', '')
+        dtt = dtstr.split(sep2, 1)[0]     # strip h:mm, unwanted end chars
+        rinsed = dtt.rstrip(dtt[-1])      # strip last char
+        final_dts = rinsed.rstrip('1')    # strip remaining
+        final_dts = final_dts.rstrip(' ')
+
+        clean_dates.append(final_dts.splitlines())
+
+    # date df to append to main
+    df2 = pd.DataFrame({'dates': clean_dates})
+
+    # cleaning dates for framing
+    dates = df2['dates']
+    dates = dates.astype(str).str.strip('[]')
+    dates = dates.replace("'", '', regex=True).replace('  ', ' ', regex=True)
+
+    # merge all dataframes
+    merged_df = df.assign(Dates=dates)
+    print(merged_df.head())
+
+    # write to csv with current date
+    current_date = f'cu_{datetime.datetime.now().strftime("%m.%d.%Y")}.csv'
+    # merged_df.to_csv(current_date, mode='a', encoding='utf-8')
